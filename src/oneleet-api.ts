@@ -13,6 +13,8 @@ export class OneleetApiError extends Error {
 }
 
 export type RequestQuery = Record<string, string | number | boolean | undefined>;
+export type RequestBody = Record<string, unknown>;
+export type RequestPayload = RequestBody | FormData;
 
 export class OneleetApiClient {
   private cookie: string;
@@ -76,6 +78,32 @@ export class OneleetApiClient {
     return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/evidence`);
   }
 
+  async getEvidence(evidenceId: string): Promise<Record<string, unknown>> {
+    return this.request(`/api/v1/evidence/${requireId(evidenceId, "evidence id")}`);
+  }
+
+  async createEvidence(tenantId: string, body: FormData): Promise<Record<string, unknown>> {
+    return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/evidence`, undefined, {
+      method: "POST",
+      body,
+      bodyType: "form",
+    });
+  }
+
+  async linkEvidenceToControl(evidenceId: string, body: RequestBody): Promise<unknown> {
+    return this.request(`/api/v1/evidence/${requireId(evidenceId, "evidence id")}/link`, undefined, {
+      method: "POST",
+      body,
+    });
+  }
+
+  async linkEvidenceToVendor(evidenceId: string, body: RequestBody): Promise<unknown> {
+    return this.request(`/api/v1/evidence/${requireId(evidenceId, "evidence id")}/link-to-vendor`, undefined, {
+      method: "POST",
+      body,
+    });
+  }
+
   async listPolicies(tenantId = this.tenantId): Promise<Record<string, unknown>> {
     return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/policies`);
   }
@@ -102,6 +130,29 @@ export class OneleetApiClient {
 
   async listRiskAssessments(tenantId = this.tenantId): Promise<Record<string, unknown>> {
     return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/risk-assessments`);
+  }
+
+  async getRisk(riskId: string): Promise<Record<string, unknown>> {
+    return this.request(`/api/v1/risks/${requireId(riskId, "risk id")}`);
+  }
+
+  async updateRisk(riskId: string, body: RequestBody): Promise<unknown> {
+    return this.request(`/api/v1/risks/${requireId(riskId, "risk id")}`, undefined, {
+      method: "PATCH",
+      body,
+    });
+  }
+
+  async archiveRisk(riskId: string): Promise<unknown> {
+    return this.request(`/api/v1/risks/${requireId(riskId, "risk id")}/archive`, undefined, {
+      method: "POST",
+    });
+  }
+
+  async unarchiveRisk(riskId: string): Promise<unknown> {
+    return this.request(`/api/v1/risks/${requireId(riskId, "risk id")}/unarchive`, undefined, {
+      method: "POST",
+    });
   }
 
   async listSecurityTrainingModules(tenantId = this.tenantId, includeDrafts?: boolean): Promise<Record<string, unknown> | unknown[]> {
@@ -185,19 +236,29 @@ export class OneleetApiClient {
     return url.toString();
   }
 
-  private async request(path: string, query?: RequestQuery): Promise<any> {
+  private async request(
+    path: string,
+    query?: RequestQuery,
+    options: { method?: "GET" | "PATCH" | "POST" | "DELETE"; body?: RequestPayload; bodyType?: "json" | "form" } = {},
+  ): Promise<any> {
     if (!this.cookie) throw new OneleetApiError("No oneleet-app cookie configured", 401);
 
     const url = this.buildUrl(path, query);
+    const method = options.method || "GET";
+    const bodyType = options.bodyType || "json";
+    const requestBody: BodyInit | undefined =
+      options.body === undefined ? undefined : bodyType === "form" ? (options.body as FormData) : JSON.stringify(options.body);
     const response = await fetch(url, {
-      method: "GET",
+      method,
       headers: {
         accept: "application/json",
+        ...(method !== "GET" && bodyType === "json" ? { "content-type": "application/json" } : {}),
         cookie: `oneleet-app=${this.cookie}`,
         origin: this.appBaseUrl,
         referer: this.tenantId ? `${this.appBaseUrl}/tenants/${this.tenantId}` : this.appBaseUrl,
         "user-agent": this.userAgent,
       },
+      body: requestBody,
     });
 
     const text = await response.text();
@@ -229,6 +290,11 @@ function validationError(message: string): OneleetApiError & { code: string } {
 function requireTenantId(value: string): string {
   if (value) return value;
   throw new OneleetApiError("No tenant id configured. Run `oneleet auth import-cdp --port 9333` or set ONELEET_TENANT_ID.", 400);
+}
+
+function requireId(value: string, label: string): string {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return value;
+  throw validationError(`Invalid ${label}. Expected a UUID.`);
 }
 
 function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
