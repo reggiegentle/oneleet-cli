@@ -1,0 +1,10 @@
+interface:
+  display_name: "Oneleet"
+  short_description: "Inspect Oneleet security and compliance posture."
+  icon_small: "./assets/oneleet-small.svg"
+  icon_large: "./assets/oneleet.svg"
+  brand_color: "#0F766E"
+  default_prompt: "Use $oneleet to inspect Oneleet compliance, HIPAA, security posture, trust-center, vendor, evidence, monitor, control, attack-surface, and code-security data with summarized JSON where appropriate."
+
+policy:
+  allow_implicit_invocation: true
