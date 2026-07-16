@@ -242,6 +242,13 @@ export class OneleetApiClient {
     return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/security-training-modules/user-progress`);
   }
 
+  async remindMembersTasks(tenantId: string, body: RequestBody): Promise<unknown> {
+    return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/remind-members/tasks`, undefined, {
+      method: "POST",
+      body,
+    });
+  }
+
   async getTrustConfig(tenantId = this.tenantId): Promise<Record<string, unknown>> {
     return this.request(`/api/v1/tenants/${requireTenantId(tenantId)}/trust/config`);
   }

@@ -1147,6 +1147,45 @@ export function buildProgram(): Command {
         return opts.raw ? data : summarizeSecurityTrainingProgress(data);
       }, opts);
     });
+  training
+    .command("remind-noncompliant")
+    .description("Send Oneleet task reminders to training-noncompliant members who are eligible for a reminder. Dry-run by default.")
+    .option("--tenant-id <id>", "Tenant id override")
+    .option("--write", "Send the reminders. Without this flag, prints a dry-run preview only.")
+    .option("--confirm <value>", "Required with --write; must equal security-training")
+    .option("--json", "Print JSON envelope")
+    .action(async (opts: SecurityTrainingReminderOptions) => {
+      await runJsonAction(async () => {
+        const config = await requireConfig(opts);
+        const tenantId = tenantIdFor(opts, config);
+        const client = clientFor(config);
+        const selection = selectSecurityTrainingReminderTargets(
+          await client.listMembers(tenantId),
+          await client.listSecurityTrainingProgress(tenantId),
+        );
+        const plan = describeSecurityTrainingReminderSelection(selection);
+        if (!opts.write) return { ...plan, dryRun: true, writeRequired: "--write --confirm security-training" };
+        requireWriteConfirmation(opts.confirm, "security-training", "security training reminder confirmation");
+        if (selection.targets.length > 0) {
+          await client.remindMembersTasks(tenantId, {
+            reminders: selection.targets.map((target) => ({
+              memberId: target.memberId,
+              portalTasks: ["SECURITY_TRAINING"],
+            })),
+          });
+        }
+        const after = selectSecurityTrainingReminderTargets(
+          await client.listMembers(tenantId),
+          await client.listSecurityTrainingProgress(tenantId),
+        );
+        return {
+          ...plan,
+          dryRun: false,
+          writtenCount: selection.targets.length,
+          after: describeSecurityTrainingReminderSelection(after),
+        };
+      }, opts);
+    });
   program.addCommand(training);
   
   const trust = new Command("trust").description("Trust center commands");
@@ -1433,6 +1472,28 @@ type AccessReviewMarkEmptyVendorsOptions = JsonOptions & {
   confirm?: string;
 };
 
+type SecurityTrainingReminderOptions = TenantOptions & {
+  write?: boolean;
+  confirm?: string;
+};
+
+type SecurityTrainingReminderTarget = {
+  memberId: string;
+  ref: string;
+  hadPreviousReminder: boolean;
+};
+
+type SecurityTrainingReminderSelection = {
+  progressCount: number;
+  noncompliantCount: number;
+  targetCount: number;
+  missingMemberCount: number;
+  notificationsDisabledCount: number;
+  formerMemberCount: number;
+  recentlyRemindedCount: number;
+  targets: SecurityTrainingReminderTarget[];
+};
+
 type EvidenceUploadDescription = {
   fileName: string;
   sizeBytes: number;
@@ -1458,6 +1519,7 @@ type AccessReviewEmptyVendorSelection = {
 
 const DEFAULT_EMPTY_ACCESS_REVIEW_VENDOR_NOTE =
   "No detected account-level access in Oneleet at review time; marked not applicable for access certification.";
+const SECURITY_TRAINING_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_POLICY_AUDIENCES = new Set(["EVERYONE", "EMPLOYEES", "CONTRACTORS", "GROUPS"]);
 const ALLOWED_RISK_RESPONSES = new Set(["ACCEPT", "MITIGATE", "TRANSFER", "AVOID"]);
 const ALLOWED_RISK_LEVELS = new Set(["MINOR", "MODERATE", "MAJOR"]);
@@ -1562,6 +1624,82 @@ function buildMonitorAssetIgnorePatch(opts: MonitorAssetIgnoreOptions): Record<s
     assetsToIgnore,
     assetsToUnignore,
     reasonToIgnore: opts.reason?.trim() || "",
+  };
+}
+
+function selectSecurityTrainingReminderTargets(membersValue: unknown, progressValue: unknown): SecurityTrainingReminderSelection {
+  const members = rowsOf(membersValue).filter((row): row is Record<string, any> => Boolean(row) && typeof row === "object");
+  const progress = rowsOf(progressValue).filter((row): row is Record<string, any> => Boolean(row) && typeof row === "object");
+  const membersByUserId = new Map<string, Record<string, any>>();
+  for (const member of members) {
+    for (const candidate of [member.user?.id, member.userPublic?.id]) {
+      if (typeof candidate === "string" && candidate) membersByUserId.set(candidate, member);
+    }
+  }
+
+  const selection: SecurityTrainingReminderSelection = {
+    progressCount: progress.length,
+    noncompliantCount: 0,
+    targetCount: 0,
+    missingMemberCount: 0,
+    notificationsDisabledCount: 0,
+    formerMemberCount: 0,
+    recentlyRemindedCount: 0,
+    targets: [],
+  };
+
+  const now = Date.now();
+  for (const row of progress) {
+    if (row.isCompliant !== false) continue;
+    selection.noncompliantCount += 1;
+    const userId = typeof row.id === "string" ? row.id : "";
+    const member = userId ? membersByUserId.get(userId) : undefined;
+    if (!member || typeof member.id !== "string" || !member.id) {
+      selection.missingMemberCount += 1;
+      continue;
+    }
+    if (member.status === "FORMER") {
+      selection.formerMemberCount += 1;
+      continue;
+    }
+    if (member.enableNotifications === false) {
+      selection.notificationsDisabledCount += 1;
+      continue;
+    }
+
+    const lastReminder = typeof member.lastTasksReminderSentAt === "string" ? Date.parse(member.lastTasksReminderSentAt) : Number.NaN;
+    const hadPreviousReminder = Number.isFinite(lastReminder);
+    if (hadPreviousReminder && now - lastReminder < SECURITY_TRAINING_REMINDER_COOLDOWN_MS) {
+      selection.recentlyRemindedCount += 1;
+      continue;
+    }
+    selection.targets.push({
+      memberId: member.id,
+      ref: `training-reminder-${String(selection.targets.length + 1).padStart(3, "0")}`,
+      hadPreviousReminder,
+    });
+  }
+  selection.targetCount = selection.targets.length;
+  return selection;
+}
+
+function describeSecurityTrainingReminderSelection(selection: SecurityTrainingReminderSelection): Record<string, unknown> {
+  return {
+    summary: {
+      progressCount: selection.progressCount,
+      noncompliantCount: selection.noncompliantCount,
+      targetCount: selection.targetCount,
+      missingMemberCount: selection.missingMemberCount,
+      notificationsDisabledCount: selection.notificationsDisabledCount,
+      formerMemberCount: selection.formerMemberCount,
+      recentlyRemindedCount: selection.recentlyRemindedCount,
+    },
+    targets: selection.targets.map((target) => ({
+      ref: target.ref,
+      hasId: true,
+      hadPreviousReminder: target.hadPreviousReminder,
+      portalTasks: ["SECURITY_TRAINING"],
+    })),
   };
 }
 
