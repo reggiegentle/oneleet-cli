@@ -303,27 +303,33 @@ export function buildProgram(): Command {
     )
     .addCommand(
       new Command("get")
-        .argument("<monitor-id>", "Monitor UUID")
+        .argument("<monitor>", "Monitor UUID or local ref from `monitors list`, for example monitor-080")
+        .option("--tenant-id <id>", "Tenant id override")
         .option("--raw", "Return full upstream monitor detail instead of a sanitized detail")
         .option("--json", "Print JSON envelope")
-        .action(async (monitorId: string, opts: JsonOptions & { raw?: boolean }) => {
+        .action(async (monitor: string, opts: TenantOptions & { raw?: boolean }) => {
           await runJsonAction(async () => {
-            const client = clientFor(await requireConfig(opts));
-            const data = await client.getMonitor(monitorId);
+            const config = await requireConfig(opts);
+            const client = clientFor(config);
+            const target = await resolveMonitorSelector(client, tenantIdFor(opts, config), monitor);
+            const data = await client.getMonitor(target.id);
             return opts.raw ? data : sanitizeMonitor(data);
           }, opts);
         }),
     )
     .addCommand(
       new Command("controls")
-        .argument("<monitor-id>", "Monitor UUID")
+        .argument("<monitor>", "Monitor UUID or local ref from `monitors list`, for example monitor-080")
+        .option("--tenant-id <id>", "Tenant id override")
         .option("--raw", "Return full upstream linked-control rows instead of summarized rows")
         .option("--show-ids", "Include raw control IDs for follow-up writes")
         .option("--json", "Print JSON envelope")
-        .action(async (monitorId: string, opts: JsonOptions & { raw?: boolean; showIds?: boolean }) => {
+        .action(async (monitor: string, opts: TenantOptions & { raw?: boolean; showIds?: boolean }) => {
           await runJsonAction(async () => {
-            const client = clientFor(await requireConfig(opts));
-            const data = await client.listMonitorControls(monitorId);
+            const config = await requireConfig(opts);
+            const client = clientFor(config);
+            const target = await resolveMonitorSelector(client, tenantIdFor(opts, config), monitor);
+            const data = await client.listMonitorControls(target.id);
             return opts.raw ? data : summarizeMonitorControls(data, { showIds: Boolean(opts.showIds) });
           }, opts);
         }),
@@ -526,14 +532,17 @@ export function buildProgram(): Command {
     .addCommand(
       new Command("checks")
         .description("List monitor/manual checks attached to a control")
-        .argument("<control-id>", "Control UUID")
+        .argument("<control>", "Control UUID or local ref from `controls list`, for example control-044")
+        .option("--tenant-id <id>", "Tenant id override")
         .option("--raw", "Return full upstream check rows instead of summarized rows")
         .option("--show-ids", "Include raw check and monitor IDs for follow-up writes")
         .option("--json", "Print JSON envelope")
-        .action(async (controlId: string, opts: JsonOptions & { raw?: boolean; showIds?: boolean }) => {
+        .action(async (control: string, opts: TenantOptions & { raw?: boolean; showIds?: boolean }) => {
           await runJsonAction(async () => {
-            const client = clientFor(await requireConfig(opts));
-            const data = await client.listControlChecks(controlId);
+            const config = await requireConfig(opts);
+            const client = clientFor(config);
+            const target = await resolveControlSelector(client, tenantIdFor(opts, config), control);
+            const data = await client.listControlChecks(target.id);
             return opts.raw ? data : summarizeControlChecks(data, { showIds: Boolean(opts.showIds) });
           }, opts);
         }),
@@ -568,25 +577,32 @@ export function buildProgram(): Command {
     )
     .addCommand(
       new Command("request-review")
-        .description("Request Oneleet review for a control. Dry-run by default; real writes require --write and --confirm <control-id>.")
-        .argument("<control-id>", "Control UUID")
+        .description("Request Oneleet review for a control. Dry-run by default; real writes require exact selector confirmation.")
+        .argument("<control>", "Control UUID or local ref from `controls list`, for example control-044")
+        .option("--tenant-id <id>", "Tenant id override")
         .option("--write", "Perform the review request. Without this flag, prints a dry-run preview only.")
-        .option("--confirm <control-id>", "Required with --write; must equal the control id")
+        .option("--confirm <control>", "Required with --write; must exactly equal the supplied control selector")
         .option("--json", "Print JSON envelope")
-        .action(async (controlId: string, opts: ControlReviewWriteOptions) => {
+        .action(async (control: string, opts: ControlReviewWriteOptions) => {
           await runJsonAction(async () => {
-            const normalizedControlId = requireUuid(controlId, "control id");
+            const config = isUuid(control) ? null : await requireConfig(opts);
+            const client = config ? clientFor(config) : null;
+            const target = client
+              ? await resolveControlSelector(client, tenantIdFor(opts, config!), control)
+              : { id: requireUuid(control, "control id"), ref: null, row: null, index: null };
             const plan = {
               dryRun: !opts.write,
-              writeRequired: "--write --confirm " + normalizedControlId,
-              controlId: normalizedControlId,
+              writeRequired: "--write --confirm " + control,
+              ...(target.ref
+                ? { selector: { mode: "ref", ref: target.ref, hasId: true } }
+                : { controlId: target.id, selector: { mode: "id", hasId: true } }),
               action: "request-review",
             };
             if (!opts.write) return plan;
-            requireWriteConfirmation(opts.confirm, normalizedControlId);
-            const client = clientFor(await requireConfig(opts));
-            await client.requestControlReview(normalizedControlId);
-            const after = unwrapData(await client.getControl(normalizedControlId));
+            requireWriteConfirmation(opts.confirm, control, "control selector");
+            const writeClient = client || clientFor(await requireConfig(opts));
+            await writeClient.requestControlReview(target.id);
+            const after = unwrapData(await writeClient.getControl(target.id));
             return {
               ...plan,
               dryRun: false,
@@ -1405,7 +1421,7 @@ type ControlFeedbackOptions = TenantOptions & {
   showIds?: boolean;
 };
 
-type ControlReviewWriteOptions = JsonOptions & {
+type ControlReviewWriteOptions = TenantOptions & {
   write?: boolean;
   confirm?: string;
 };
@@ -1694,8 +1710,8 @@ function uniqueUuidList(ids: string[], label: string): string[] {
   return out;
 }
 
-function requireWriteConfirmation(confirm: string | undefined, expected: string): void {
-  if (confirm !== expected) throw codeError("VALIDATION", "--write requires --confirm to exactly match the monitor id.");
+function requireWriteConfirmation(confirm: string | undefined, expected: string, label = "monitor id"): void {
+  if (confirm !== expected) throw codeError("VALIDATION", `--write requires --confirm to exactly match the ${label}.`);
 }
 
 function setString(target: Record<string, unknown>, key: string, value: string | undefined): void {
@@ -1860,8 +1876,12 @@ function uniqueIds(ids: string[]): string[] {
 
 function requireUuid(value: string | undefined, label: string): string {
   const candidate = (value || "").trim();
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate)) return candidate;
+  if (isUuid(candidate)) return candidate;
   throw codeError("VALIDATION", `Invalid ${label}. Expected a UUID.`);
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
 }
 
 function hasLinkedId(value: unknown, id: string): boolean {
@@ -1932,6 +1952,13 @@ type ResolvedMonitor = {
   index: number;
 };
 
+type ResolvedControl = {
+  id: string;
+  ref: string | null;
+  row: Record<string, any> | null;
+  index: number | null;
+};
+
 type MonitorWaitResult = {
   completed: boolean;
   reason: "not-requested" | "completed" | "timeout";
@@ -1940,6 +1967,7 @@ type MonitorWaitResult = {
 };
 
 const MONITOR_REF_PATTERN = /^monitor-(\d+)$/;
+const CONTROL_REF_PATTERN = /^control-(\d+)$/;
 const ACTIVE_RUN_STATUSES = new Set(["PENDING", "RUNNING", "IN_PROGRESS", "RETRYING", "UNQUERIED"]);
 
 function rowsFromMonitorList(raw: unknown): MonitorRow[] {
@@ -1962,6 +1990,41 @@ function resolveMonitorForRefresh(selector: string, rows: MonitorRow[]): Resolve
   return monitorAt(rows, index);
 }
 
+async function resolveMonitorSelector(
+  client: ReturnType<typeof clientFor>,
+  tenantId: string,
+  selector: string,
+): Promise<ResolvedMonitor> {
+  if (isUuid(selector)) {
+    return { id: selector, ref: "", row: {}, index: -1 };
+  }
+  return resolveMonitorForRefresh(selector, rowsFromMonitorList(await client.listMonitors(tenantId)));
+}
+
+async function resolveControlSelector(
+  client: ReturnType<typeof clientFor>,
+  tenantId: string,
+  selector: string,
+): Promise<ResolvedControl> {
+  if (isUuid(selector)) {
+    return { id: selector, ref: null, row: null, index: null };
+  }
+  const match = CONTROL_REF_PATTERN.exec(selector);
+  if (!match) {
+    throw codeError("VALIDATION", "Control must be a UUID or local ref like control-044 from `oneleet controls list`.");
+  }
+  const rows = rowsOf(await client.listControls(tenantId)) as Record<string, any>[];
+  const index = Number(match[1]) - 1;
+  if (!Number.isSafeInteger(index) || index < 0 || index >= rows.length) {
+    throw codeError("NOT_FOUND", "No control exists for that local ref in the current control list.");
+  }
+  const row = rows[index];
+  if (!row || typeof row.id !== "string" || !row.id.trim()) {
+    throw codeError("CHECK_FAILED", "Control row is missing an upstream id required for this command.");
+  }
+  return { id: row.id, ref: controlRefForIndex(index), row, index };
+}
+
 function monitorAt(rows: MonitorRow[], index: number): ResolvedMonitor {
   const row = rows[index];
   if (!row || typeof row.id !== "string" || !row.id.trim()) {
@@ -1977,6 +2040,10 @@ function monitorAt(rows: MonitorRow[], index: number): ResolvedMonitor {
 
 function refForIndex(index: number): string {
   return `monitor-${String(index + 1).padStart(3, "0")}`;
+}
+
+function controlRefForIndex(index: number): string {
+  return `control-${String(index + 1).padStart(3, "0")}`;
 }
 
 function parseWaitSeconds(value: string): number {

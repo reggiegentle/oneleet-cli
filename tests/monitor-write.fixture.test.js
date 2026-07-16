@@ -135,6 +135,40 @@ test("monitor-control and control-check reads summarize linked relationships", a
   }
 });
 
+test("monitor detail and relationship reads accept sanitized local refs", async () => {
+  const server = await startMonitorServer();
+  const tempConfigHome = await mkdtemp(path.join(os.tmpdir(), "oneleet-cli-monitor-local-refs-"));
+
+  try {
+    const monitorDetail = await runCli(["monitors", "get", "monitor-001", "--json"], fixtureEnv(server.url, tempConfigHome));
+    assert.equal(monitorDetail.code, 0, monitorDetail.stderr);
+    const monitorPayload = JSON.parse(monitorDetail.stdout);
+    assert.equal(monitorPayload.ok, true);
+    assert.equal(monitorPayload.data.monitorType, "All people have completed applicable security trainings in the past 12 months");
+
+    const monitorControls = await runCli(
+      ["monitors", "controls", "monitor-001", "--show-ids", "--json"],
+      fixtureEnv(server.url, tempConfigHome),
+    );
+    assert.equal(monitorControls.code, 0, monitorControls.stderr);
+    const controlsPayload = JSON.parse(monitorControls.stdout);
+    assert.equal(controlsPayload.ok, true);
+    assert.equal(controlsPayload.data.rows[0].id, controlId);
+
+    const controlChecks = await runCli(
+      ["controls", "checks", "control-001", "--show-ids", "--json"],
+      fixtureEnv(server.url, tempConfigHome),
+    );
+    assert.equal(controlChecks.code, 0, controlChecks.stderr);
+    const checksPayload = JSON.parse(controlChecks.stdout);
+    assert.equal(checksPayload.ok, true);
+    assert.equal(checksPayload.data.rows[0].monitorId, monitorId);
+  } finally {
+    await server.close();
+    await rm(tempConfigHome, { recursive: true, force: true });
+  }
+});
+
 async function startMonitorServer() {
   const requests = [];
   const requestBodies = [];
@@ -143,6 +177,16 @@ async function startMonitorServer() {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     requests.push({ method: request.method, pathname: url.pathname });
+
+    if (request.method === "GET" && url.pathname === `/api/v1/tenants/${tenantId}/monitors`) {
+      writeJson(response, { rows: [monitorFixture(monitorStatus)] });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === `/api/v1/tenants/${tenantId}/controls/program`) {
+      writeJson(response, { rows: [controlFixture()] });
+      return;
+    }
 
     if (request.method === "POST" && url.pathname === `/api/v1/monitors/${monitorId}/enabled`) {
       const body = JSON.parse(await readRequestBody(request));
@@ -219,6 +263,17 @@ function monitorFixture(status) {
     latestRun: { status: "COMPLETE", createdAt: "2026-06-08T15:00:00.000Z" },
     currentState: { status: "OPEN" },
     updatedAt: "2026-06-08T15:00:00.000Z",
+  };
+}
+
+function controlFixture() {
+  return {
+    id: controlId,
+    status: "FAILING",
+    controlType: {
+      title: "Security awareness training conducted",
+      category: "SECURITY_TRAINING",
+    },
   };
 }
 

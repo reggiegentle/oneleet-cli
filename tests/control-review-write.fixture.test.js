@@ -56,6 +56,33 @@ test("control request-review writes through the Oneleet control endpoint", async
   }
 });
 
+test("control request-review accepts a local control ref without exposing the upstream id", async () => {
+  const server = await startControlServer();
+  const tempConfigHome = await mkdtemp(path.join(os.tmpdir(), "oneleet-cli-control-review-local-ref-"));
+
+  try {
+    const result = await runCli(
+      ["controls", "request-review", "control-001", "--write", "--confirm", "control-001", "--json"],
+      fixtureEnv(server.url, tempConfigHome),
+    );
+
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.data.selector, { mode: "ref", ref: "control-001", hasId: true });
+    assert.equal("controlId" in payload.data, false);
+    assert.equal(result.stdout.includes(controlId), true);
+    assert.deepEqual(server.requests.map((request) => request.method + " " + request.pathname), [
+      `GET /api/v1/tenants/${tenantId}/controls/program`,
+      `POST /api/v1/controls/${controlId}/request-review`,
+      `GET /api/v1/controls/${controlId}`,
+    ]);
+  } finally {
+    await server.close();
+    await rm(tempConfigHome, { recursive: true, force: true });
+  }
+});
+
 async function startControlServer() {
   const requests = [];
   let submitted = false;
@@ -63,6 +90,11 @@ async function startControlServer() {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     requests.push({ method: request.method, pathname: url.pathname });
+
+    if (request.method === "GET" && url.pathname === `/api/v1/tenants/${tenantId}/controls/program`) {
+      writeJson(response, { rows: [controlFixture(submitted)] });
+      return;
+    }
 
     if (request.method === "POST" && url.pathname === `/api/v1/controls/${controlId}/request-review`) {
       submitted = true;
